@@ -24,9 +24,15 @@ func http404(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotFound)
 }
 
-func httpSleep(sleep time.Duration) http.HandlerFunc {
+func httpSlow(delay time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(sleep)
+		select {
+		case <-time.After(delay):
+		case <-w.(http.CloseNotifier).CloseNotify():
+			// Client has closed connection.
+			return
+		}
+		time.Sleep(delay)
 	}
 }
 
@@ -44,18 +50,15 @@ func closedConn(c net.Conn) {
 }
 
 func TestRun(t *testing.T) {
-	tests := []struct {
-		name    string
+	tests := map[string]struct {
 		timeout time.Duration
 		servers []server
 	}{
-		{
-			name:    "no-servers",
+		"no-servers": {
 			timeout: time.Millisecond,
 			servers: nil,
 		},
-		{
-			name:    "one-healthy",
+		"one-healthy": {
 			timeout: 10 * time.Millisecond,
 			servers: []server{
 				{
@@ -69,8 +72,7 @@ func TestRun(t *testing.T) {
 				},
 			},
 		},
-		{
-			name:    "multiple-healthy",
+		"multiple-healthy": {
 			timeout: 10 * time.Millisecond,
 			servers: []server{
 				{
@@ -93,8 +95,7 @@ func TestRun(t *testing.T) {
 				},
 			},
 		},
-		{
-			name:    "one-unhealthy",
+		"one-unhealthy": {
 			timeout: 10 * time.Millisecond,
 			servers: []server{
 				{
@@ -108,8 +109,7 @@ func TestRun(t *testing.T) {
 				},
 			},
 		},
-		{
-			name:    "multiple-unhealthy",
+		"multiple-unhealthy": {
 			timeout: 10 * time.Millisecond,
 			servers: []server{
 				{
@@ -148,8 +148,7 @@ func TestRun(t *testing.T) {
 				},
 			},
 		},
-		{
-			name:    "one-slow",
+		"one-slow": {
 			timeout: 10 * time.Millisecond,
 			servers: []server{
 				{
@@ -157,14 +156,13 @@ func TestRun(t *testing.T) {
 					options: []func(*testserver.Server){
 						testserver.Quiet,
 						testserver.HTTPServer,
-						testserver.HTTPHandlerFunc("/status", httpSleep(100*time.Millisecond)),
+						testserver.HTTPHandlerFunc("/status", httpSlow(100*time.Millisecond)),
 					},
 					expectedStatus: false,
 				},
 			},
 		},
-		{
-			name:    "multiple-slow-one-fast",
+		"multiple-slow-one-fast": {
 			timeout: 10 * time.Millisecond,
 			servers: []server{
 				{
@@ -172,7 +170,7 @@ func TestRun(t *testing.T) {
 					options: []func(*testserver.Server){
 						testserver.Quiet,
 						testserver.HTTPServer,
-						testserver.HTTPHandlerFunc("/status", httpSleep(100*time.Millisecond)),
+						testserver.HTTPHandlerFunc("/status", httpSlow(100*time.Millisecond)),
 					},
 					expectedStatus: false,
 				},
@@ -181,7 +179,7 @@ func TestRun(t *testing.T) {
 					options: []func(*testserver.Server){
 						testserver.Quiet,
 						testserver.HTTPServer,
-						testserver.HTTPHandlerFunc("/status", httpSleep(1000*time.Millisecond)),
+						testserver.HTTPHandlerFunc("/status", httpSlow(1000*time.Millisecond)),
 					},
 					expectedStatus: false,
 				},
@@ -190,7 +188,7 @@ func TestRun(t *testing.T) {
 					options: []func(*testserver.Server){
 						testserver.Quiet,
 						testserver.HTTPServer,
-						testserver.HTTPHandlerFunc("/status", httpSleep(1*time.Millisecond)),
+						testserver.HTTPHandlerFunc("/status", httpSlow(1*time.Millisecond)),
 					},
 					expectedStatus: true,
 				},
@@ -198,8 +196,8 @@ func TestRun(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
 			var services []healthcheck.Service
 			for _, s := range tc.servers {
 				srv := testserver.New(t, s.options...)
@@ -210,11 +208,11 @@ func TestRun(t *testing.T) {
 			statusByAddr := healthcheck.Run(services, tc.timeout)
 
 			for i := range tc.servers {
-				name := tc.servers[i].name
+				srvName := tc.servers[i].name
 				expected := tc.servers[i].expectedStatus
 				actual := statusByAddr[services[i].Addr()]
 				if actual != expected {
-					t.Errorf("server %s: expected status %t, got %t", name, expected, actual)
+					t.Errorf("server %s: expected status %t, got %t", srvName, expected, actual)
 				}
 			}
 		})
